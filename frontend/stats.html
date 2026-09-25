@@ -18,26 +18,52 @@
       <button class="btn btn-outline" onclick="load()">🔄 刷新</button>
     </div>
 
+    <div class="card range-card">
+      <div class="range-tabs" id="rangeTabs">
+        <button class="range-tab" data-mode="overall" onclick="switchMode('overall')">整体</button>
+        <button class="range-tab" data-mode="24h" onclick="switchMode('24h')">近 24 小时</button>
+        <button class="range-tab" data-mode="custom" onclick="switchMode('custom')">自定义时间段</button>
+      </div>
+      <div class="range-custom hidden" id="customBox">
+        <input type="datetime-local" id="startInput" step="1">
+        <span class="range-sep">至</span>
+        <input type="datetime-local" id="endInput" step="1">
+        <button class="btn btn-primary btn-sm" onclick="applyCustom()">查询</button>
+        <button class="btn btn-outline btn-sm" onclick="resetCustom()">重置</button>
+        <span class="hint" style="margin:0">时间使用 UTC</span>
+      </div>
+      <div class="range-msg" id="rangeMsg"></div>
+    </div>
+
     <div class="stat-grid" id="statCards"></div>
 
     <div class="grid-2">
-      <div class="card"><div class="card-title">评测结果分布</div><div class="chart-box"><canvas id="verdictChart"></canvas></div><div id="verdictFallback"></div></div>
-      <div class="card"><div class="card-title">提交语言分布</div><div class="chart-box"><canvas id="langChart"></canvas></div><div id="langFallback"></div></div>
+      <div class="card">
+        <div class="card-title"><span id="verdictTitle">评测结果分布</span><span class="range-summary" id="verdictRange"></span></div>
+        <div class="chart-box"><canvas id="verdictChart"></canvas><div id="verdictEmpty" class="chart-empty hidden"></div></div>
+        <div id="verdictFallback"></div>
+      </div>
+      <div class="card">
+        <div class="card-title"><span id="langTitle">提交语言分布</span><span class="range-summary" id="langRange"></span></div>
+        <div class="chart-box"><canvas id="langChart"></canvas><div id="langEmpty" class="chart-empty hidden"></div></div>
+        <div id="langFallback"></div>
+      </div>
     </div>
 
     <div class="card">
-      <div class="card-title">近 24 小时提交趋势</div>
-      <div class="chart-box"><canvas id="timelineChart"></canvas></div><div id="timelineFallback"></div>
+      <div class="card-title"><span id="timelineTitle">近 24 小时提交趋势</span><span class="range-summary" id="timelineRange"></span></div>
+      <div class="chart-box"><canvas id="timelineChart"></canvas><div id="timelineEmpty" class="chart-empty hidden"></div></div>
+      <div id="timelineFallback"></div>
     </div>
 
     <div class="card">
-      <div class="card-title">题目提交与通过情况</div>
-      <div class="chart-box"><canvas id="problemChart"></canvas></div>
+      <div class="card-title"><span id="problemTitle">题目提交与通过情况</span><span class="range-summary" id="problemRange"></span></div>
+      <div class="chart-box"><canvas id="problemChart"></canvas><div id="problemEmpty" class="chart-empty hidden"></div></div>
       <div class="table-wrap mt-8 hidden" id="problemTable"></div>
     </div>
 
     <div class="card">
-      <div class="card-title">活跃用户 TOP 10</div>
+      <div class="card-title"><span id="topUsersTitle">活跃用户 TOP 10</span><span class="range-summary" id="topUsersRange"></span></div>
       <div class="table-wrap"><table><thead><tr><th>#</th><th>用户</th><th>提交数</th></tr></thead><tbody id="topUsers"></tbody></table></div>
     </div>
 
@@ -55,54 +81,184 @@
   <script>
     OJ.boot("stats");
     let charts = {};
+    // 当前视图：overall（整体，旧行为）| 24h | custom
+    let mode = "overall";
+    let customApplied = null;   // 已应用的自定义区间 {start, end}
 
     const COLORS = ["#3d5afe", "#16a34a", "#dc2626", "#ea580c", "#7c3aed", "#ca8a04", "#0891b2", "#64748b", "#db2777", "#059669"];
+    const GRAN_NAME = { hour: "小时", day: "天", week: "周", month: "月" };
 
     function destroyCharts() { Object.values(charts).forEach(c => { try { c.destroy(); } catch (e) {} }); charts = {}; }
 
+    /* ---------- 时间范围选择 ---------- */
+    function pad(n) { return String(n).padStart(2, "0"); }
+    function toLocalInputValue(d) {
+      return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}T${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`;
+    }
+    function defaultCustomRange() {
+      const end = new Date();
+      const start = new Date(Date.now() - 7 * 86400000);
+      return { start: toLocalInputValue(start), end: toLocalInputValue(end) };
+    }
+
+    function switchMode(next) {
+      mode = next;
+      document.querySelectorAll(".range-tab").forEach(t => t.classList.toggle("active", t.dataset.mode === next));
+      OJ.el("customBox").classList.toggle("hidden", next !== "custom");
+      if (next === "custom" && customApplied === null) {
+        const r = defaultCustomRange();
+        OJ.el("startInput").value = r.start;
+        OJ.el("endInput").value = r.end;
+        customApplied = { start: r.start, end: r.end };
+      }
+      setRangeMsg("", "");
+      load();
+    }
+
+    function applyCustom() {
+      const start = OJ.el("startInput").value;
+      const end = OJ.el("endInput").value;
+      if (!start || !end) { setRangeMsg("请同时选择开始时间和结束时间", "error"); return; }
+      if (start > end) { setRangeMsg("开始时间不能晚于结束时间，请重新选择", "error"); return; }
+      customApplied = { start, end };
+      load();
+    }
+
+    function resetCustom() {
+      const r = defaultCustomRange();
+      OJ.el("startInput").value = r.start;
+      OJ.el("endInput").value = r.end;
+      customApplied = { start: r.start, end: r.end };
+      setRangeMsg("", "");
+      load();
+    }
+
+    function setRangeMsg(text, kind) {
+      const el = OJ.el("rangeMsg");
+      el.textContent = text;
+      el.className = "range-msg" + (kind ? " " + kind : "");
+    }
+
+    /* ---------- 数据加载 ---------- */
+    function buildQuery() {
+      if (mode === "24h") return "?range=24h";
+      if (mode === "custom" && customApplied) return "?start=" + encodeURIComponent(customApplied.start) + "&end=" + encodeURIComponent(customApplied.end);
+      return "";
+    }
+
     async function load() {
       try {
-        const d = await OJ.api("/stats/overview");
+        const d = await OJ.api("/stats/overview" + buildQuery());
+        setRangeMsg(d.scoped ? rangeSummaryText(d.range) : "", "ok");
         renderCards(d);
         renderCharts(d);
       } catch (e) {
-        OJ.el("statCards").innerHTML = `<div class="empty">${OJ.esc(e.message)}</div>`;
+        renderError(e.message);
       }
+    }
+
+    function renderError(message) {
+      setRangeMsg(message, "error");
+      destroyCharts();
+      OJ.el("statCards").innerHTML = "";
+      OJ.el("topUsers").innerHTML = `<tr><td colspan="3" class="empty">${OJ.esc(message)}</td></tr>`;
+      ["verdict", "lang", "timeline", "problem"].forEach(name => showEmpty(name, message));
+      OJ.el("verdictFallback").innerHTML = "";
+      OJ.el("langFallback").innerHTML = "";
+      OJ.el("timelineFallback").innerHTML = "";
+      ["verdict", "lang", "timeline", "problem", "topUsers"].forEach(name => OJ.el(name + "Range").textContent = "");
+    }
+
+    function rangeSummaryText(r) {
+      const span = r.mode === "24h" ? "近 24 小时" : `${r.start.replace("T", " ")} ~ ${r.end.replace("T", " ")}（UTC）`;
+      const n = r.submissions;
+      return n
+        ? `${span} · 共 ${n} 条提交 · 按${GRAN_NAME[r.granularity] || r.granularity}聚合`
+        : `${span} · 该时间段内暂无提交`;
     }
 
     function renderCards(d) {
       const c = d.counts;
+      const scoped = !!d.scoped;
+      const userLbl = scoped ? "活跃用户" : "注册用户";
+      const problemLbl = scoped ? "有提交题目" : "题目总数";
+      const contestLbl = scoped ? "涉及竞赛" : "竞赛总数";
       OJ.el("statCards").innerHTML = `
-        <div class="stat-card"><div class="val">${c.users}</div><div class="lbl">注册用户</div></div>
-        <div class="stat-card"><div class="val">${c.problems}</div><div class="lbl">题目总数</div></div>
-        <div class="stat-card"><div class="val">${c.contests}</div><div class="lbl">竞赛总数</div></div>
+        <div class="stat-card"><div class="val">${c.users}</div><div class="lbl">${userLbl}</div></div>
+        <div class="stat-card"><div class="val">${c.problems}</div><div class="lbl">${problemLbl}</div></div>
+        <div class="stat-card"><div class="val">${c.contests}</div><div class="lbl">${contestLbl}</div></div>
         <div class="stat-card"><div class="val">${c.submissions}</div><div class="lbl">提交总数</div></div>
         <div class="stat-card"><div class="val" style="color:var(--green)">${c.accepted}</div><div class="lbl">通过提交</div></div>
         <div class="stat-card"><div class="val" style="color:var(--primary)">${(c.ac_rate * 100).toFixed(1)}%</div><div class="lbl">通过率</div></div>`;
     }
 
+    function showEmpty(name, text) {
+      const box = OJ.el(name + "Empty");
+      if (!box) return;
+      box.textContent = text;
+      box.classList.remove("hidden");
+      const canvas = document.getElementById(name + "Chart");
+      if (canvas) canvas.classList.add("hidden");
+    }
+
+    function hideEmpty(name) {
+      const box = OJ.el(name + "Empty");
+      if (box) box.classList.add("hidden");
+      const canvas = document.getElementById(name + "Chart");
+      if (canvas) canvas.classList.remove("hidden");
+    }
+
+    function renderTitles(d) {
+      const scoped = !!d.scoped;
+      const summary = d.range ? rangeSummaryText(d.range) : "";
+      OJ.el("timelineTitle").textContent = scoped
+        ? `提交趋势（按${GRAN_NAME[d.range.granularity] || d.range.granularity}）`
+        : "近 24 小时提交趋势";
+      const rangeText = scoped ? summary : "近 24 小时";
+      OJ.el("timelineRange").textContent = scoped ? summary : "";
+      ["verdict", "lang", "problem", "topUsers"].forEach(name => {
+        OJ.el(name + "Range").textContent = scoped ? summary : "";
+      });
+    }
+
     function renderCharts(d) {
       destroyCharts();
+      ["verdict", "lang", "timeline", "problem"].forEach(hideEmpty);
+      renderTitles(d);
+
       const hasChart = typeof Chart !== "undefined";
       const verdicts = d.verdicts || {}, langs = d.languages || {};
       const vLabels = Object.keys(verdicts), vData = Object.values(verdicts);
       const lLabels = Object.keys(langs), lData = Object.values(langs);
 
-      if (hasChart) {
+      // 空区间统一空状态（整体视图各部分独立，保持旧行为）
+      if (d.scoped && !d.range.submissions) {
+        showEmpty("verdict", "该时间段内暂无提交");
+        showEmpty("lang", "该时间段内暂无提交");
+        showEmpty("timeline", "该时间段内暂无提交");
+        showEmpty("problem", "该时间段内暂无提交，没有题目通过情况");
+        OJ.el("verdictFallback").innerHTML = "";
+        OJ.el("langFallback").innerHTML = "";
+        OJ.el("timelineFallback").innerHTML = "";
+      } else if (hasChart) {
         const pieOpts = (labels, data, colors) => ({
           type: "doughnut",
           data: { labels, datasets: [{ data, backgroundColor: colors || labels.map((_, i) => COLORS[i % COLORS.length]) }] },
           options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: "right" } } },
         });
         if (vLabels.length) charts.verdict = new Chart(document.getElementById("verdictChart"), pieOpts(vLabels, vData, vLabels.map(l => verdictColor(l))));
+        else showEmpty("verdict", "暂无判定结果数据");
         if (lLabels.length) charts.lang = new Chart(document.getElementById("langChart"), pieOpts(lLabels, lData));
+        else showEmpty("lang", "暂无语言数据");
 
         if (d.timeline && d.timeline.length) {
           charts.timeline = new Chart(document.getElementById("timelineChart"), {
             type: "line",
-            data: { labels: d.timeline.map(x => x.hour.slice(11)), datasets: [{ label: "提交数", data: d.timeline.map(x => x.count), borderColor: "#3d5afe", backgroundColor: "rgba(61,90,254,.12)", fill: true, tension: .35 }] },
+            data: { labels: timelineLabels(d), datasets: [{ label: "提交数", data: d.timeline.map(x => x.count), borderColor: "#3d5afe", backgroundColor: "rgba(61,90,254,.12)", fill: true, tension: .35 }] },
             options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true, ticks: { precision: 0 } } } },
           });
+        } else {
+          showEmpty("timeline", "暂无趋势数据");
         }
         if (d.problem_stats && d.problem_stats.length) {
           charts.problem = new Chart(document.getElementById("problemChart"), {
@@ -113,20 +269,28 @@
             ] },
             options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true, ticks: { precision: 0 } } } },
           });
+        } else {
+          showEmpty("problem", d.scoped ? "该时间段内没有任何题目的提交" : "暂无题目数据");
         }
       } else {
         // 无 Chart.js 时的降级表格
-        document.getElementById("verdictFallback").innerHTML = tableFrom("评测结果分布", verdicts);
-        document.getElementById("langFallback").innerHTML = tableFrom("语言分布", langs);
+        OJ.el("verdictFallback").innerHTML = tableFrom("评测结果分布", verdicts);
+        OJ.el("langFallback").innerHTML = tableFrom("语言分布", langs);
       }
 
       // 活跃用户
       const tu = OJ.el("topUsers");
-      tu.innerHTML = (d.top_users || []).map((u, i) => `<tr><td>${i + 1}</td><td>${OJ.esc(u.username)}</td><td class="mono">${u.submissions}</td></tr>`).join("") || `<tr><td colspan="3" class="empty">暂无数据</td></tr>`;
+      tu.innerHTML = (d.top_users || []).map((u, i) => `<tr><td>${i + 1}</td><td>${OJ.esc(u.username)}</td><td class="mono">${u.submissions}</td></tr>`).join("") || `<tr><td colspan="3" class="empty">${d.scoped ? "该时间段内暂无活跃用户" : "暂无数据"}</td></tr>`;
+    }
+
+    function timelineLabels(d) {
+      if (d.scoped) return d.timeline.map(x => x.label);
+      return d.timeline.map(x => x.hour.slice(11));
     }
 
     function tableFrom(title, obj) {
       const rows = Object.entries(obj).map(([k, v]) => `<tr><td>${OJ.esc(k)}</td><td class="mono">${v}</td></tr>`).join("");
+      if (!rows) return "";
       return `<div class="table-wrap mt-8"><table><thead><tr><th>${OJ.esc(title)}</th><th>数量</th></tr></thead><tbody>${rows}</tbody></table></div>`;
     }
 
@@ -152,6 +316,8 @@
       } catch (e) { /* 忽略 */ }
     }
 
+    // 初始激活“整体”视图
+    document.querySelector('.range-tab[data-mode="overall"]').classList.add("active");
     load();
     loadCheatReport();
     setInterval(load, 15000);
