@@ -18,6 +18,41 @@
       <button class="btn btn-outline" onclick="load()">🔄 刷新</button>
     </div>
 
+    <div class="card">
+      <div class="card-title">⏱️ 自定义时间段统计 <span class="hint">选择起止时间，查看该时段内的提交趋势、判定结果分布与各题通过情况</span></div>
+      <div class="toolbar" style="margin-bottom:0;align-items:flex-end">
+        <div style="min-width:210px">
+          <label for="rangeStart">开始时间</label>
+          <input type="datetime-local" id="rangeStart">
+        </div>
+        <div style="min-width:210px">
+          <label for="rangeEnd">结束时间</label>
+          <input type="datetime-local" id="rangeEnd">
+        </div>
+        <button class="btn btn-primary" id="rangeQueryBtn" onclick="queryRange()">查询</button>
+        <button class="btn btn-outline" onclick="resetRange()">重置</button>
+      </div>
+      <div class="hint">时段统计结果展示在下方，不影响页面其余部分的整体与近 24 小时统计。</div>
+    </div>
+
+    <div id="rangeSection" class="hidden">
+      <div class="card">
+        <div class="card-title" id="rangeTitle">时段统计</div>
+        <div class="stat-grid" id="rangeCards" style="margin-bottom:0"></div>
+      </div>
+      <div class="grid-2">
+        <div class="card"><div class="card-title">提交趋势（时段内）</div><div class="chart-box"><canvas id="rangeTimelineChart"></canvas></div><div id="rangeTimelineFallback"></div></div>
+        <div class="card"><div class="card-title">判定结果分布（时段内）</div><div class="chart-box"><canvas id="rangeVerdictChart"></canvas></div><div id="rangeVerdictFallback"></div></div>
+      </div>
+      <div class="card">
+        <div class="card-title">各题通过情况（时段内）</div>
+        <div class="chart-box"><canvas id="rangeProblemChart"></canvas></div>
+        <div class="table-wrap mt-8" id="rangeProblemTable"></div>
+      </div>
+    </div>
+
+    <div class="card hidden" id="rangeEmpty"><div class="empty" id="rangeEmptyText">该时间段内暂无提交记录</div></div>
+
     <div class="stat-grid" id="statCards"></div>
 
     <div class="grid-2">
@@ -133,6 +168,104 @@
     function verdictColor(v) {
       const map = { AC: "#16a34a", WA: "#dc2626", TLE: "#ea580c", MLE: "#7c3aed", RE: "#ca8a04", CE: "#64748b", OLE: "#7c3aed", SE: "#64748b", PENDING: "#0891b2", JUDGING: "#0891b2" };
       return map[v] || "#64748b";
+    }
+
+    /* ---------- 自定义时间段统计 ---------- */
+    // 独立图表注册表：整体视图每 15s 刷新会 destroyCharts()，不能波及时段图表
+    let rangeCharts = {};
+
+    function destroyRangeCharts() { Object.values(rangeCharts).forEach(c => { try { c.destroy(); } catch (e) {} }); rangeCharts = {}; }
+
+    async function queryRange() {
+      const start = OJ.el("rangeStart").value;
+      const end = OJ.el("rangeEnd").value;
+      if (!start || !end) { OJ.toast("请选择开始时间和结束时间", "error"); return; }
+      if (new Date(start) > new Date(end)) { OJ.toast("开始时间不能晚于结束时间", "error"); return; }
+      const btn = OJ.el("rangeQueryBtn");
+      btn.disabled = true;
+      try {
+        const d = await OJ.api(`/stats/range?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`);
+        renderRange(d, start, end);
+      } catch (e) {
+        OJ.toast(e.message, "error");
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    function resetRange() {
+      OJ.el("rangeStart").value = "";
+      OJ.el("rangeEnd").value = "";
+      destroyRangeCharts();
+      OJ.el("rangeSection").classList.add("hidden");
+      OJ.el("rangeEmpty").classList.add("hidden");
+    }
+
+    function renderRange(d, start, end) {
+      destroyRangeCharts();
+      const rangeText = `${start.replace("T", " ")} ~ ${end.replace("T", " ")}`;
+      const empty = !d.counts || !d.counts.submissions;
+      OJ.el("rangeSection").classList.toggle("hidden", empty);
+      OJ.el("rangeEmpty").classList.toggle("hidden", !empty);
+      if (empty) {
+        OJ.el("rangeEmptyText").textContent = `该时间段（${rangeText}）内暂无提交记录`;
+        return;
+      }
+
+      OJ.el("rangeTitle").textContent = `时段统计：${rangeText}`;
+      const c = d.counts;
+      OJ.el("rangeCards").innerHTML = `
+        <div class="stat-card"><div class="val">${c.submissions}</div><div class="lbl">时段内提交</div></div>
+        <div class="stat-card"><div class="val" style="color:var(--green)">${c.accepted}</div><div class="lbl">通过提交</div></div>
+        <div class="stat-card"><div class="val" style="color:var(--primary)">${(c.ac_rate * 100).toFixed(1)}%</div><div class="lbl">通过率</div></div>
+        <div class="stat-card"><div class="val">${c.users}</div><div class="lbl">提交用户</div></div>`;
+
+      const hasChart = typeof Chart !== "undefined";
+      const verdicts = d.verdicts || {};
+      const vLabels = Object.keys(verdicts), vData = Object.values(verdicts);
+      const gran = (d.range && d.range.granularity) || "hour";
+      const bucketLabel = b => gran === "hour" ? b.slice(11) + ":00" : (gran === "day" ? b.slice(5) : b);
+
+      if (hasChart) {
+        if (vLabels.length) {
+          rangeCharts.verdict = new Chart(document.getElementById("rangeVerdictChart"), {
+            type: "doughnut",
+            data: { labels: vLabels, datasets: [{ data: vData, backgroundColor: vLabels.map(l => verdictColor(l)) }] },
+            options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: "right" } } },
+          });
+        }
+        if (d.timeline && d.timeline.length) {
+          rangeCharts.timeline = new Chart(document.getElementById("rangeTimelineChart"), {
+            type: "line",
+            data: { labels: d.timeline.map(x => bucketLabel(x.bucket)), datasets: [{ label: "提交数", data: d.timeline.map(x => x.count), borderColor: "#3d5afe", backgroundColor: "rgba(61,90,254,.12)", fill: true, tension: .35 }] },
+            options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true, ticks: { precision: 0 } } } },
+          });
+        }
+        if (d.problem_stats && d.problem_stats.length) {
+          rangeCharts.problem = new Chart(document.getElementById("rangeProblemChart"), {
+            type: "bar",
+            data: { labels: d.problem_stats.map(x => x.id), datasets: [
+              { label: "提交", data: d.problem_stats.map(x => x.submissions), backgroundColor: "rgba(61,90,254,.7)" },
+              { label: "通过", data: d.problem_stats.map(x => x.accepted), backgroundColor: "rgba(22,163,74,.7)" },
+            ] },
+            options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true, ticks: { precision: 0 } } } },
+          });
+        }
+      } else {
+        // 无 Chart.js 时的降级表格
+        document.getElementById("rangeVerdictFallback").innerHTML = tableFrom("判定结果分布", verdicts);
+        document.getElementById("rangeTimelineFallback").innerHTML =
+          tableFrom("提交趋势", Object.fromEntries((d.timeline || []).map(x => [bucketLabel(x.bucket), x.count])));
+      }
+
+      // 各题通过情况表（含通过率，图表无法完整表达）
+      const rows = (d.problem_stats || []).map(p => `
+        <tr><td class="mono">${OJ.esc(p.id)}</td><td>${OJ.esc(p.title || "")}</td>
+        <td class="mono text-center">${p.submissions}</td><td class="mono text-center">${p.accepted}</td>
+        <td class="mono text-center">${(p.pass_rate * 100).toFixed(1)}%</td></tr>`).join("");
+      OJ.el("rangeProblemTable").innerHTML = rows
+        ? `<table><thead><tr><th>题目</th><th>名称</th><th class="text-center">提交</th><th class="text-center">通过</th><th class="text-center">通过率</th></tr></thead><tbody>${rows}</tbody></table>`
+        : "";
     }
 
     async function loadCheatReport() {
